@@ -1,0 +1,42 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Build output
+App/frontend/dist/
+App/src-tauri/target/
+App/dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+App/sidecar/.venv/
+App/sidecar/generated/
+
+# Tauri generated
+App/src-tauri/gen/
+
+# Recordings / user data
+*.wav
+*.mp3
+*.mp4
+test_speech.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env / secrets
+.env
+*.key
+*.pem
+
+# Business folders (keep code only)
+Admin/
+Finance/
+Legal/
+Operations/
+Sales_Marketing/
+ZArchive/
+Assets/

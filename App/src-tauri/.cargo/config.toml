@@ -1,0 +1,3 @@
+# Point the linker to VS 2019 MSVC libs (msvcrt.lib lives here on this machine)
+[env]
+LIB = { value = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\VC\\Tools\\MSVC\\14.29.30133\\lib\\x64", force = false }

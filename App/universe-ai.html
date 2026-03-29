@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Universe AI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body,#app{height:100%;overflow:hidden}
+body{background:#06060e;color:#e2dff5;font-family:'Outfit',sans-serif;font-size:14px}
+::-webkit-scrollbar{width:4px;height:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#2a2858;border-radius:2px}
+input,textarea,select,button{font-family:'Outfit',sans-serif;font-size:13px;color:#e2dff5}
+input::placeholder,textarea::placeholder{color:#3e3760}textarea{resize:none}select option{background:#111128;color:#e2dff5}
+@keyframes fadeUp{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse{0%,100%{opacity:.2;transform:scale(.75)}50%{opacity:1;transform:scale(1)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes blink{0%,100%{opacity:.15;transform:scale(.7)}50%{opacity:1;transform:scale(1)}}
+@keyframes slideR{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:translateX(0)}}
+@keyframes glow{0%,100%{box-shadow:0 0 0 0 rgba(220,53,69,.4)}50%{box-shadow:0 0 0 10px rgba(220,53,69,0)}}
+@keyframes connPulse{0%{stroke-dashoffset:0}100%{stroke-dashoffset:-20}}
+button:hover{opacity:.82}button:active{opacity:.65}
+input:focus,textarea:focus,select:focus{outline:none;border-color:rgba(108,95,245,.6)!important;box-shadow:0 0 0 3px rgba(108,95,245,.1)}
+</style>
+</head>
+<body><div id="app"></div>
+<script type="module">
+import{createElement as h,useState,useRef,useEffect,useCallback,Fragment}from'https://esm.sh/react@18'
+import{createRoot}from'https://esm.sh/react-dom@18/client'
+
+// ═══ THEME ═══
+const T={bg:'#06060e',s1:'#0c0c1a',s2:'#111128',s3:'#181834',s4:'#1e1e3a',
+  b:'rgba(108,95,245,.13)',b2:'rgba(108,95,245,.26)',b3:'rgba(255,255,255,.05)',
+  tx:'#e2dff5',mu:'#6e6892',mu2:'#3e3760',ac:'#6c5ff5',ac2:'#4a43cc',
+  gr:'#0fb878',or:'#e05a28',amb:'#c47a10',bl:'#2b84d9',pk:'#d95bb5',tl:'#12b89e',rd:'#e03030'}
+
+// ═══ PERSISTENCE ═══
+const HF_TOKEN=localStorage.getItem('uai_hf_token')||''
+const ls={get:(k,d)=>{try{const v=localStorage.getItem('uai_'+k);return v?JSON.parse(v):d}catch{return d}},
+  set:(k,v)=>{try{localStorage.setItem('uai_'+k,JSON.stringify(v))}catch{}}}
+function usePersisted(key,def){
+  const[v,setV]=useState(()=>ls.get(key,def))
+  const set=useCallback(val=>{const nv=typeof val==='function'?val(v):val;setV(nv);ls.set(key,nv)},[key])
+  return[v,set]}
+
+// ═══ OLLAMA API ═══
+const OLLAMA='http://localhost:11434'
+async function ollamaPing(){try{const r=await fetch(OLLAMA+'/api/tags',{signal:AbortSignal.timeout(2000)});return r.ok}catch{return false}}
+async function ollamaModels(){try{const r=await fetch(OLLAMA+'/api/tags');const d=await r.json();return d.models||[]}catch{return[]}}
+async function ollamaChat(msgs,model='mistral:7b-instruct'){
+  const r=await fetch(OLLAMA+'/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({model,messages:msgs,stream:false})})
+  if(!r.ok)throw new Error('Ollama '+r.status)
+  const d=await r.json();return d.message?.content||''}
+async function ollamaPull(name,onProg){
+  const r=await fetch(OLLAMA+'/api/pull',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name,stream:true})})
+  const reader=r.body.getReader();const dec=new TextDecoder()
+  while(true){const{done,value}=await reader.read();if(done)break
+    for(const line of dec.decode(value).split('\n').filter(Boolean)){
+      try{const d=JSON.parse(line);if(d.total&&d.completed)onProg(Math.round(d.completed/d.total*100));
+        else if(d.status)onProg(d.status)}catch{}}}}
+
+// ═══ HF API ═══
+const HFB='https://api-inference.huggingface.co'
+async function hfChat(msgs,model='mistralai/Mistral-7B-Instruct-v0.3'){
+  const r=await fetch(HFB+'/v1/chat/completions',{method:'POST',
+    headers:{Authorization:'Bearer '+HF_TOKEN,'Content-Type':'application/json'},
+    body:JSON.stringify({model,messages:msgs,max_tokens:600,stream:false})})
+  if(!r.ok)throw new Error('HF '+r.status)
+  const d=await r.json();return d.choices?.[0]?.message?.content||''}
+async function hfInfer(model,payload,blob=false){
+  const isBlob=payload instanceof Blob
+  const r=await fetch(HFB+'/models/'+model,{method:'POST',
+    headers:{Authorization:'Bearer '+HF_TOKEN,...(!isBlob&&{'Content-Type':'application/json'})},
+    body:isBlob?payload:JSON.stringify(payload)})
+  if(!r.ok)throw new Error('HF '+r.status)
+  return blob?r.blob():r.json()}
+
+// ═══ ANTHROPIC API ═══
+async function anthropicChat(msgs,key,model='claude-haiku-3-5'){
+  const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model,max_tokens:600,messages:msgs})})
+  if(!r.ok)throw new Error('Anthropic '+r.status)
+  const d=await r.json();return d.content?.[0]?.text||''}
+
+// ═══ MODEL ROUTER ═══
+async function aiChat(msgs,{ollamaOk,settings}={}){
+  const s=settings||{}
+  if(ollamaOk){try{return{text:await ollamaChat(msgs,s.ollamaModel||'mistral:7b-instruct'),via:'Ollama'}}catch{}}
+  if(s.anthropicEnabled&&s.anthropicKey){
+    try{
+      const spend=ls.get('spend_'+new Date().toDateString(),0)
+      if(spend<(s.budget||2)){
+        const text=await anthropicChat(msgs,s.anthropicKey)
+        ls.set('spend_'+new Date().toDateString(),(spend+0.001))
+        return{text,via:'Claude Haiku'}}
+    }catch{}}
+  try{return{text:await hfChat(msgs),via:'HuggingFace'}}catch{}
+  return{text:'All AI providers unavailable. Check Ollama or settings.',via:'none'}}
+
+// ═══ DATA TYPES ═══
+const DT={VIDEO:{c:'#e05a28',i:'🎬',l:'Video'},AUDIO:{c:'#0fb878',i:'🎵',l:'Audio'},
+  IMAGE:{c:'#d95bb5',i:'🖼️',l:'Image'},TEXT:{c:'#6c5ff5',i:'📝',l:'Text'},
+  TRANSCRIPT:{c:'#12b89e',i:'📋',l:'Transcript'},DOCUMENT:{c:'#c47a10',i:'📄',l:'Document'},
+  DATA:{c:'#2b84d9',i:'📊',l:'Data'},URL:{c:'#7a7299',i:'🔗',l:'URL'},DONE:{c:'#0fb878',i:'✓',l:'Done'}}
+
+// ═══ STEP TYPES ═══
+const STEP_TYPES=[
+  {id:'extract-audio',n:'Extract Audio',i:'🎵',cat:'Media',inp:'VIDEO',out:'AUDIO',fields:[]},
+  {id:'whisper',n:'Whisper Large V3',i:'🎙️',cat:'Speech',inp:'AUDIO',out:'TRANSCRIPT',
+    fields:[{k:'language',l:'Language',t:'select',o:['auto','en','es','fr','de','zh','ja','ko','pt','ru']},
+      {k:'timestamps',l:'Timestamps',t:'select',o:['word-level','sentence-level','none']},
+      {k:'diarization',l:'Speaker Diarization',t:'toggle'},{k:'format',l:'Output Format',t:'select',o:['transcript','plain text','SRT','VTT']}]},
+  {id:'llm',n:'Mistral 7B',i:'🧠',cat:'LLM',inp:'TEXT',out:'TEXT',
+    fields:[{k:'model',l:'Model',t:'select',o:['mistral:7b-instruct','codellama:13b','llama3.2:3b','nomic-embed-text']},
+      {k:'prompt',l:'Prompt',t:'textarea',rows:5,ph:'Instructions for this AI step…'},
+      {k:'temperature',l:'Temperature',t:'slider',min:0,max:1,step:0.1,def:0.7},
+      {k:'maxTokens',l:'Max Tokens',t:'number',def:1000},
+      {k:'systemPrompt',l:'System Prompt Override',t:'textarea',rows:3,collapsed:true}]},
+  {id:'legal-llm',n:'Legal-GPT 7B',i:'⚖️',cat:'LLM',inp:'TEXT',out:'TEXT',
+    fields:[{k:'prompt',l:'Prompt',t:'textarea',rows:5,ph:'Legal analysis instructions…'},
+      {k:'jurisdiction',l:'Jurisdiction',t:'select',o:['United States','United Kingdom','EU','Australia','Canada']}]},
+  {id:'docformer',n:'DocFormer Parser',i:'📄',cat:'Documents',inp:'DOCUMENT',out:'TEXT',
+    fields:[{k:'extract',l:'Extract',t:'select',o:['text + tables + structure','text only','tables only']}]},
+  {id:'translator',n:'M2M-100 Translator',i:'🌐',cat:'Language',inp:'TEXT',out:'TEXT',
+    fields:[{k:'sourceLang',l:'Source Language',t:'select',o:['auto-detect','en','es','fr','de','zh','ja','ar','pt','ru','ko','hi']},
+      {k:'targetLang',l:'Target Language',t:'select',o:['es','fr','de','zh','ja','ar','pt','ru','ko','hi','it','nl','pl','tr','vi']},
+      {k:'preserve',l:'Preserve Formatting',t:'toggle'}]},
+  {id:'subtitle-burner',n:'Subtitle Burner',i:'🔤',cat:'Video',inp:'VIDEO',out:'VIDEO',multiInp:['VIDEO','TRANSCRIPT'],
+    fields:[{k:'style',l:'Style Preset',t:'select',o:['Netflix Style','Clean White','Bold Black Outline','YouTube Auto','Minimal']},
+      {k:'position',l:'Position',t:'select',o:['bottom','top','center']},
+      {k:'sync',l:'Sync Mode',t:'select',o:['word-level','sentence-level']},
+      {k:'fontSize',l:'Font Size',t:'slider',min:16,max:48,step:2,def:28}]},
+  {id:'web-fetch',n:'Web Fetch',i:'🌐',cat:'Data',inp:'TEXT',out:'TEXT',
+    fields:[{k:'urls',l:'URLs (one per line)',t:'textarea',rows:3},{k:'maxResults',l:'Max Results',t:'number',def:15}]},
+  {id:'save-file',n:'Save to File',i:'💾',cat:'Output',inp:'TEXT',out:'DONE',
+    fields:[{k:'path',l:'Output Directory',t:'text',ph:'~/Documents/Output'},{k:'filename',l:'Filename Pattern',t:'text',ph:'{{date}}_{{pipeline_name}}'},
+      {k:'format',l:'Format',t:'select',o:['auto','.md','.txt','.pdf','.docx']},
+      {k:'exists',l:'If File Exists',t:'select',o:['rename','overwrite','skip']}]},
+  {id:'send-email',n:'Send Email',i:'📧',cat:'Output',inp:'TEXT',out:'DONE',
+    fields:[{k:'account',l:'From Account',t:'select',o:['Gmail — Personal','Gmail — Work']},
+      {k:'to',l:'To',t:'text',ph:'recipient@email.com'},{k:'subject',l:'Subject',t:'text',ph:'{{pipeline_name}} — {{date}}'}]},
+  {id:'csv-parser',n:'CSV Parser',i:'📊',cat:'Data',inp:'DOCUMENT',out:'DATA',fields:[]},
+  {id:'chart-gen',n:'Chart Generator',i:'📈',cat:'Data',inp:'DATA',out:'IMAGE',
+    fields:[{k:'type',l:'Chart Type',t:'select',o:['bar','line','pie','scatter']}]}]
+
+// ═══ DEFAULT PIPELINES ═══
+const DEFAULT_PIPELINES=[
+  {id:'p1',icon:'🎬',name:'Video Auto-Caption',
+    trigger:{type:'file-watch',label:'File Watch',config:{path:'~/Videos/inbox',ext:'.mp4 .mov .avi .mkv'}},
+    inputs:[],lastRun:null,status:'idle',
+    steps:[
+      {id:'s1',typeId:'extract-audio',config:{},expanded:false,state:'idle'},
+      {id:'s2',typeId:'whisper',config:{language:'auto',timestamps:'word-level',diarization:true,format:'transcript'},expanded:false,state:'idle'},
+      {id:'s3',typeId:'subtitle-burner',config:{style:'Netflix Style',position:'bottom',sync:'word-level',fontSize:28},expanded:false,state:'idle'},
+      {id:'s4',typeId:'save-file',config:{path:'~/Videos/captioned',filename:'{{source_name}}_captioned',format:'auto',exists:'rename'},expanded:false,state:'idle'}]},
+  {id:'p2',icon:'🎤',name:'Meeting Intelligence',
+    trigger:{type:'manual-inputs',label:'Manual + Inputs',config:{}},
+    inputs:[
+      {id:'i1',type:'file',label:'Meeting Recording',ext:'.mp3 .mp4 .m4a .wav',required:true},
+      {id:'i2',type:'textarea',label:'Meeting Context',required:false,ph:'e.g. Q3 planning with marketing'},
+      {id:'i3',type:'dropdown',label:'Output Format',required:true,opts:['Full summary + action items','Executive brief only','Full transcript + summary']}],
+    lastRun:null,status:'idle',
+    steps:[
+      {id:'s1',typeId:'whisper',config:{language:'auto',timestamps:'sentence-level',diarization:true},expanded:false,state:'idle'},
+      {id:'s2',typeId:'llm',config:{model:'mistral:7b-instruct',prompt:'Summarize this meeting transcript.\nExtract: 1) Key decisions made 2) Action items with owner names and deadlines 3) Open questions.\nFormat as clean structured markdown.',temperature:0.3,maxTokens:2000},expanded:false,state:'idle'},
+      {id:'s3',typeId:'save-file',config:{path:'~/Documents/Meeting Notes',filename:'{{date}}_meeting',format:'.md',exists:'rename'},expanded:false,state:'idle'},
+      {id:'s4',typeId:'send-email',config:{subject:'Meeting Summary — {{date}}'},expanded:false,state:'idle'}]},
+  {id:'p3',icon:'⚖️',name:'Contract Review',
+    trigger:{type:'manual-inputs',label:'Manual + Inputs',config:{}},
+    inputs:[
+      {id:'i1',type:'file',label:'Contract Document',ext:'.pdf .docx .doc',required:true},
+      {id:'i2',type:'textarea',label:'Review Focus',required:false,ph:'e.g. Focus on liability, payment terms, IP ownership'},
+      {id:'i3',type:'dropdown',label:'Jurisdiction',required:false,opts:['United States','United Kingdom','European Union','Australia','Canada','Other']}],
+    lastRun:null,status:'idle',
+    steps:[
+      {id:'s1',typeId:'docformer',config:{extract:'text + tables + structure'},expanded:false,state:'idle'},
+      {id:'s2',typeId:'legal-llm',config:{prompt:'Review this contract thoroughly. Identify and rate each issue as HIGH/MED/LOW:\n1) Missing protective clauses\n2) Aggressive or one-sided language\n3) Liability exposure\n4) IP and ownership risks\n5) Payment and termination terms\n\nFormat each finding as:\n[SEVERITY] Section X.X — Issue description — Recommended fix'},expanded:false,state:'idle'},
+      {id:'s3',typeId:'llm',config:{model:'mistral:7b-instruct',prompt:'Convert this contract review into an executive summary. Lead with the top 3 risks, then overall recommendation: SIGN / NEGOTIATE / REJECT',temperature:0.2,maxTokens:800},expanded:false,state:'idle'},
+      {id:'s4',typeId:'save-file',config:{path:'~/Documents/Legal/Reviews',filename:'{{date}}_contract_review',format:'.md',exists:'rename'},expanded:false,state:'idle'}]},
+  {id:'p4',icon:'📰',name:'Daily Research Digest',
+    trigger:{type:'schedule',label:'Schedule',config:{cron:'0 7 * * *',label:'Daily at 7:00 AM'}},
+    inputs:[],lastRun:null,status:'idle',
+    steps:[
+      {id:'s1',typeId:'web-fetch',config:{urls:'https://arxiv.org/list/cs.AI/recent\nhttps://news.ycombinator.com',maxResults:15},expanded:false,state:'idle'},
+      {id:'s2',typeId:'llm',config:{model:'mistral:7b-instruct',prompt:'You are a research analyst. From this raw content, create a daily digest:\n## Top Papers (5 most significant)\nFor each: title, 2-sentence summary, why it matters\n## Tech News (5 most relevant)\nFor each: headline, 1-sentence summary\n## One Big Idea\nOne paragraph connecting today\'s themes.\nBe concise. No fluff.',temperature:0.5,maxTokens:2000},expanded:false,state:'idle'},
+      {id:'s3',typeId:'save-file',config:{path:'~/Documents/Daily Digest',filename:'digest_{{date}}',format:'.md',exists:'rename'},expanded:false,state:'idle'},
+      {id:'s4',typeId:'send-email',config:{subject:'🧠 Research Digest — {{date}}'},expanded:false,state:'idle'}]},
+  {id:'p5',icon:'🌐',name:'Translate & Reformat',
+    trigger:{type:'manual-inputs',label:'Manual + Inputs',config:{}},
+    inputs:[
+      {id:'i1',type:'file',label:'Document to Translate',ext:'.pdf .docx .txt .md',required:true},
+      {id:'i2',type:'dropdown',label:'Target Language',required:true,opts:['Spanish','French','German','Chinese','Japanese','Arabic','Portuguese','Russian','Korean','Hindi','Italian','Dutch']},
+      {id:'i3',type:'dropdown',label:'Output Format',required:true,opts:['Same as input','Markdown','Plain text','PDF']}],
+    lastRun:null,status:'idle',
+    steps:[
+      {id:'s1',typeId:'docformer',config:{extract:'text + tables + structure'},expanded:false,state:'idle'},
+      {id:'s2',typeId:'translator',config:{sourceLang:'auto-detect',targetLang:'es',preserve:true},expanded:false,state:'idle'},
+      {id:'s3',typeId:'llm',config:{model:'mistral:7b-instruct',prompt:'Reformat this translated text cleanly. Preserve all headings, bullet points, and structure. Fix any translation artifacts or awkward phrasing. Output clean, natural text.',temperature:0.3,maxTokens:2000},expanded:false,state:'idle'},
+      {id:'s4',typeId:'save-file',config:{path:'~/Documents/Translated',filename:'{{source_name}}_translated',format:'auto',exists:'rename'},expanded:false,state:'idle'}]}]
+
+// ═══ SERVICES ═══
+const INIT_SVCS=[
+  {id:'gdrive',n:'Google Drive',fb:'📁',cat:'Storage',color:'#4285F4',multiAccount:true,accounts:[{id:'a1',label:'Personal',email:'user@gmail.com',connected:true},{id:'a2',label:'Work',email:'user@company.com',connected:false}]},
+  {id:'gmail',n:'Gmail',fb:'📧',cat:'Email',color:'#EA4335',multiAccount:true,accounts:[{id:'a1',label:'Personal',email:'user@gmail.com',connected:true},{id:'a2',label:'Work',email:'user@company.com',connected:false}]},
+  {id:'slack',n:'Slack',fb:'💬',cat:'Comms',color:'#4A154B',multiAccount:true,accounts:[{id:'a1',label:'Company',email:'workspace.slack.com',connected:true}]},
+  {id:'notion',n:'Notion',fb:'📓',cat:'Notes',color:'#fff',multiAccount:false,accounts:[{id:'a1',label:'Personal',email:'user@email.com',connected:false}]},
+  {id:'github',n:'GitHub',fb:'🐙',cat:'Dev',color:'#fff',multiAccount:true,accounts:[{id:'a1',label:'Personal',email:'personal@github.com',connected:false}]},
+  {id:'discord',n:'Discord',fb:'🎮',cat:'Comms',color:'#5865F2',multiAccount:false,accounts:[{id:'a1',label:'Personal',email:'user#1234',connected:false}]},
+  {id:'webhook',n:'Webhook',fb:'🔗',cat:'Dev',color:T.tl,multiAccount:false,accounts:[{id:'a1',label:'Default',email:'Built-in',connected:true}]}]
+
+// ═══ APP ═══
+function App(){
+  const[tab,setTab]=useState('chat')
+  const[dynTabs,setDynTabs]=useState([])
+  const[onboarded,setOnboarded]=usePersisted('onboarded',false)
+  const[settings,setSettings]=usePersisted('settings',{ollamaUrl:'http://localhost:11434',ollamaModel:'mistral:7b-instruct',anthropicEnabled:false,anthropicKey:'',budget:2,tone:'professional'})
+  const[pipelines,setPipelines]=usePersisted('pipelines',DEFAULT_PIPELINES)
+  const[services,setServices]=usePersisted('services',INIT_SVCS)
+  const[msgs,setMsgs]=usePersisted('chatHistory',[{role:'assistant',content:'**Universe AI** — Ready\n\nI route to Ollama (local) first, then HuggingFace as fallback. Toggle Anthropic Claude in Settings.\n\nTry: *"Build a summarizer tool"* or *"What models do I have?"*'}])
+  const[chatInput,setChatInput]=useState('')
+  const[thinking,setThinking]=useState(false)
+  const[ollamaOk,setOllamaOk]=useState(false)
+  const[ollamaModelList,setOllamaModelList]=useState([])
+  const[activePipeline,setActivePipeline]=useState('p1')
+  const[runState,setRunState]=useState(null) // null | {pipelineId,stepId,log:[]}
+  const[runModal,setRunModal]=useState(null)
+  const[runInputs,setRunInputs]=useState({})
+  const[chatVia,setChatVia]=useState('')
+  const bottomRef=useRef()
+  useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:'smooth'})},[msgs,thinking])
+  useEffect(()=>{(async()=>{const ok=await ollamaPing();setOllamaOk(ok);if(ok){const ms=await ollamaModels();setOllamaModelList(ms)}})()},[])
+  useEffect(()=>{const id=setInterval(async()=>{const ok=await ollamaPing();setOllamaOk(ok)},15000);return()=>clearInterval(id)},[])
+
+  // ── UI helpers ──
+  const tag=(c,txt,sx={})=>h('span',{style:{padding:'2px 8px',borderRadius:5,fontSize:11,fontWeight:600,background:c+'20',color:c,...sx}},txt)
+  const badge=(c,...k)=>h('div',{style:{display:'inline-flex',alignItems:'center',gap:5,padding:'3px 9px',borderRadius:6,fontSize:11,background:c+'18',color:c}},k)
+  const dot=(c,anim)=>h('div',{style:{width:7,height:7,borderRadius:'50%',background:c,flexShrink:0,animation:anim?'pulse 1.4s infinite':undefined}})
+  const spin=()=>h('div',{style:{width:16,height:16,border:'2px solid '+T.ac+'44',borderTopColor:T.ac,borderRadius:'50%',animation:'spin .6s linear infinite'}})
+  const Btn=({children,onClick,v='ac',sx={}})=>h('button',{onClick,style:{padding:'7px 15px',border:'none',borderRadius:8,fontWeight:500,cursor:'pointer',background:v==='ok'?T.gr:v==='ghost'?T.s3:v==='red'?T.rd:v==='warn'?T.amb:T.ac,color:T.tx,...sx}},children)
+  const Field=({label,children,sx={}})=>h('div',{style:{marginBottom:12,...sx}},h('div',{style:{fontSize:11,color:T.mu,fontWeight:600,marginBottom:5,textTransform:'uppercase',letterSpacing:'.5px'}},label),children)
+  const inputSx={width:'100%',background:T.s3,border:'1px solid '+T.b2,borderRadius:8,padding:'8px 11px',color:T.tx}
+  const DTBadge=({type})=>{const d=DT[type]||DT.TEXT;return h('span',{style:{padding:'2px 8px',borderRadius:5,fontSize:10,fontWeight:700,background:d.c+'20',color:d.c}},d.i+' '+d.l)}
+
+  // ── Onboarding ──
+  const Onboarding=()=>h('div',{style:{position:'fixed',inset:0,background:'rgba(6,6,14,.96)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}},
+    h('div',{style:{background:T.s2,border:'1px solid '+T.b2,borderRadius:20,padding:40,maxWidth:520,width:'90%',textAlign:'center',animation:'fadeUp .3s ease'}},
+      h('div',{style:{fontSize:48,marginBottom:16}},'🌌'),
+      h('div',{style:{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:26,marginBottom:12}},h('span',{style:{color:T.ac}},'Universe'),' AI'),
+      h('div',{style:{fontSize:15,color:T.tx,lineHeight:1.8,marginBottom:8}},'Works completely offline and free.'),
+      h('div',{style:{fontSize:13,color:T.mu,lineHeight:1.7,marginBottom:28}},'Powered by Ollama local models. Optionally connect your claude.ai account for enhanced chat — uses your existing subscription, no extra cost.'),
+      h('div',{style:{display:'flex',flexDirection:'column',gap:10,marginBottom:28}},
+        [{c:T.gr,i:'✓',t:'No account required'},{c:T.gr,i:'✓',t:'Runs 100% locally with Ollama'},{c:T.ac,i:'○',t:'Optional: Anthropic Claude (Pro/Max subscription)'}]
+          .map(x=>h('div',{key:x.t,style:{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',background:T.s3,borderRadius:10,fontSize:13}},
+            h('span',{style:{color:x.c,fontWeight:700}},x.i),x.t))),
+      h(Btn,{onClick:()=>setOnboarded(true),sx:{width:'100%',padding:'13px',fontSize:15,borderRadius:12}},'Get Started →'),
+      h('div',{style:{fontSize:12,color:T.mu2,marginTop:14}},'Install Ollama at ollama.ai for local AI models')))
+
+  // ── Markdown renderer ──
+  const renderMD=text=>text.split('\n').map((line,i)=>{
+    const inl=l=>l.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((p,j)=>{
+      if(p.startsWith('**')&&p.endsWith('**'))return h('strong',{key:j},p.slice(2,-2))
+      if(p.startsWith('`')&&p.endsWith('`'))return h('code',{key:j,style:{fontFamily:"'JetBrains Mono',monospace",fontSize:12,background:T.s3,padding:'1px 5px',borderRadius:3,color:'#a9b4ff'}},p.slice(1,-1))
+      return h(Fragment,{key:j},p)})
+    if(line.startsWith('## '))return h('div',{key:i,style:{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:15,marginTop:8,marginBottom:4}},inl(line.slice(3)))
+    if(line.startsWith('# '))return h('div',{key:i,style:{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:17,marginBottom:6}},inl(line.slice(2)))
+    if(line.match(/^[-•] /))return h('div',{key:i,style:{display:'flex',gap:7,marginBottom:2}},h('span',{style:{color:T.ac}},'›'),h('span',null,inl(line.slice(2))))
+    return h(Fragment,{key:i},i>0&&h('br'),inl(line))})
+
+  // ── Chat ──
+  const sendChat=async()=>{
+    if(!chatInput.trim()||thinking)return
+    const text=chatInput.trim();setChatInput('')
+    const newMsgs=[...msgs,{role:'user',content:text}]
+    setMsgs(newMsgs);setThinking(true)
+    const sys=`You are Universe AI assistant. Available tabs: Chat, Pipelines, Tools, Automations, Connections, Agents, Settings. Ollama: ${ollamaOk?'connected ('+ollamaModelList.map(m=>m.name).slice(0,3).join(', ')+')':'not connected'}. When building a tool respond with JSON block: \`\`\`build-tool\n{"name":"Name","icon":"emoji","desc":"description"}\n\`\`\``
+    const chatMsgs=[{role:'system',content:sys},...newMsgs.slice(-8).map(m=>({role:m.role,content:m.content}))]
+    try{
+      const{text:reply,via}=await aiChat(chatMsgs,{ollamaOk,settings})
+      setChatVia(via)
+      const bm=reply.match(/```build-tool\n([\s\S]+?)```/)
+      if(bm){try{const bd=JSON.parse(bm[1]);const tid='tool-'+Date.now();setDynTabs(p=>[...p,{id:tid,label:'🔧 '+bd.name,closeable:true,comp:'custom',data:bd}]);setTab(tid)}catch{}}
+      setMsgs([...newMsgs,{role:'assistant',content:reply}])
+    }catch(e){setMsgs([...newMsgs,{role:'assistant',content:'Error: '+e.message}])}
+    setThinking(false)}
+
+  const Chat=()=>h('div',{style:{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}},
+    h('div',{style:{flex:1,overflowY:'auto',padding:'20px 18px',display:'flex',flexDirection:'column',gap:12}},
+      msgs.map((m,i)=>h('div',{key:i,style:{display:'flex',justifyContent:m.role==='user'?'flex-end':'flex-start',animation:'fadeUp .2s ease'}},
+        h('div',{style:{maxWidth:'76%',padding:'11px 15px',borderRadius:m.role==='user'?'14px 14px 3px 14px':'14px 14px 14px 3px',background:m.role==='user'?T.ac2:T.s2,border:'1px solid '+(m.role==='user'?T.ac+'44':T.b),fontSize:13.5,lineHeight:1.75}},
+          m.role==='assistant'&&h('div',{style:{fontSize:10,fontWeight:700,color:T.ac,marginBottom:6,letterSpacing:'1px',fontFamily:"'JetBrains Mono',monospace"}},'UNIVERSE AI'),
+          h('div',null,renderMD(m.content))))),
+      thinking&&h('div',{style:{display:'flex'}},h('div',{style:{padding:'11px 15px',borderRadius:'14px 14px 14px 3px',background:T.s2,border:'1px solid '+T.b}},
+        h('div',{style:{fontSize:10,fontWeight:700,color:T.ac,marginBottom:6,letterSpacing:'1px',fontFamily:"'JetBrains Mono',monospace"}},'UNIVERSE AI'),
+        h('div',{style:{display:'flex',gap:5,alignItems:'center'}},spin(),h('span',{style:{fontSize:12,color:T.mu,marginLeft:6}},'Thinking...')))),
+      h('div',{ref:bottomRef})),
+    h('div',{style:{padding:'8px 14px 0',display:'flex',gap:6,overflowX:'auto',flexShrink:0}},
+      ['What models do I have?','Build a summarizer tool','Explain the Pipelines tab','Check Ollama status'].map(q=>
+        h('button',{key:q,onClick:()=>setChatInput(q),style:{padding:'4px 11px',background:T.s3,border:'1px solid '+T.b,borderRadius:20,color:T.mu,cursor:'pointer',fontSize:12,whiteSpace:'nowrap',flexShrink:0}},q))),
+    chatVia&&h('div',{style:{padding:'4px 14px',fontSize:10,color:T.mu2,fontFamily:"'JetBrains Mono',monospace"}},'via '+chatVia),
+    h('div',{style:{padding:'10px 14px 14px',display:'flex',gap:10,flexShrink:0}},
+      h('textarea',{rows:2,value:chatInput,onChange:e=>setChatInput(e.target.value),onKeyDown:e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendChat()}},placeholder:'Chat with AI, build tools, ask anything…',style:{flex:1,background:T.s2,border:'1px solid '+T.b2,borderRadius:10,padding:'10px 13px',color:T.tx,lineHeight:1.6}}),
+      h('button',{onClick:sendChat,disabled:thinking,style:{padding:'10px 18px',background:T.ac,border:'none',borderRadius:10,color:T.tx,fontWeight:600,cursor:'pointer',alignSelf:'flex-end',fontSize:13}},thinking?'…':'Send')))
+
+  // ── Pipelines Tab ──
+  const getStepType=id=>STEP_TYPES.find(s=>s.id===id)||STEP_TYPES[0]
+  const ap=pipelines.find(p=>p.id===activePipeline)||pipelines[0]
+
+  const updateStep=(pid,sid,changes)=>setPipelines(ps=>ps.map(p=>p.id!==pid?p:{...p,steps:p.steps.map(s=>s.id!==sid?s:{...s,...changes})}))
+  const toggleStep=(pid,sid)=>setPipelines(ps=>ps.map(p=>p.id!==pid?p:{...p,steps:p.steps.map(s=>s.id!==sid?s:{...s,expanded:!s.expanded})}))
+
+  const StepConfigField=({f,val,onChange})=>{
+    if(f.t==='select')return h('select',{value:val??f.def??f.o?.[0],onChange:e=>onChange(e.target.value),style:inputSx},f.o.map(o=>h('option',{key:o,value:o},o)))
+    if(f.t==='textarea')return h('textarea',{rows:f.rows||3,value:val??'',onChange:e=>onChange(e.target.value),placeholder:f.ph||'',style:inputSx})
+    if(f.t==='toggle')return h('div',{style:{display:'flex',alignItems:'center',gap:10}},
+      h('div',{onClick:()=>onChange(!val),style:{width:36,height:20,borderRadius:10,background:val?T.gr:T.s4,cursor:'pointer',position:'relative',transition:'background .2s'}},
+        h('div',{style:{position:'absolute',top:3,left:val?17:3,width:14,height:14,borderRadius:'50%',background:'#fff',transition:'left .2s'}})),
+      h('span',{style:{fontSize:12,color:T.mu}},val?'On':'Off'))
+    if(f.t==='slider')return h('div',{style:{display:'flex',gap:10,alignItems:'center'}},
+      h('input',{type:'range',min:f.min,max:f.max,step:f.step,value:val??f.def??f.min,onChange:e=>onChange(Number(e.target.value)),style:{flex:1,accentColor:T.ac}}),
+      h('span',{style:{fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:T.ac,minWidth:30}},val??f.def??f.min))
+    if(f.t==='number')return h('input',{type:'number',value:val??f.def??0,onChange:e=>onChange(Number(e.target.value)),style:{...inputSx,width:'100%'}})
+    return h('input',{type:'text',value:val??'',onChange:e=>onChange(e.target.value),placeholder:f.ph||'',style:inputSx})}
+
+  const runPipeline=async(pipeline,userInputs={})=>{
+    const log=[]
+    const addLog=msg=>{log.push(msg);setRunState(p=>p?{...p,log:[...log]}:p)}
+    setRunState({pipelineId:pipeline.id,stepId:null,log:[]})
+    for(const step of pipeline.steps){
+      setRunState(p=>p?{...p,stepId:step.id}:p)
+      setPipelines(ps=>ps.map(p=>p.id!==pipeline.id?p:{...p,steps:p.steps.map(s=>s.id!==step.id?s:{...s,state:'running'})}))
+      const st=getStepType(step.typeId)
+      addLog('▶ '+st.n+'…')
+      try{
+        if(step.typeId==='llm'||step.typeId==='legal-llm'){
+          const prev=log.filter(l=>!l.startsWith('▶')&&!l.startsWith('✓')&&!l.startsWith('✗')).slice(-1)[0]||JSON.stringify(userInputs)
+          const{text}=await aiChat([{role:'user',content:(step.config.prompt||'Summarize the following:')+'\n\n'+prev}],{ollamaOk,settings})
+          addLog(text.slice(0,300)+(text.length>300?'…':''))
+        }else{await new Promise(r=>setTimeout(r,700+Math.random()*800));addLog('Completed: '+st.n)}
+        setPipelines(ps=>ps.map(p=>p.id!==pipeline.id?p:{...p,steps:p.steps.map(s=>s.id!==step.id?s:{...s,state:'done'})}))
+        addLog('✓ '+st.n+' done')
+      }catch(e){
+        setPipelines(ps=>ps.map(p=>p.id!==pipeline.id?p:{...p,steps:p.steps.map(s=>s.id!==step.id?s:{...s,state:'error'})}))
+        addLog('✗ '+st.n+': '+e.message);break}}
+    setPipelines(ps=>ps.map(p=>p.id!==pipeline.id?p:{...p,lastRun:new Date().toLocaleTimeString(),status:'idle',steps:p.steps.map(s=>({...s,state:'idle'}))}))
+    setTimeout(()=>setRunState(null),4000)}
+
+  const handleRun=pipeline=>{
+    if(pipeline.inputs?.length>0){setRunInputs({});setRunModal(pipeline)}
+    else runPipeline(pipeline)}
+
+  const Pipelines=()=>h('div',{style:{flex:1,display:'flex',overflow:'hidden'}},
+    // Left sidebar
+    h('div',{style:{width:220,borderRight:'1px solid '+T.b,display:'flex',flexDirection:'column',flexShrink:0}},
+      h('div',{style:{padding:'12px 14px',borderBottom:'1px solid '+T.b,display:'flex',justifyContent:'space-between',alignItems:'center'}},
+        h('span',{style:{fontWeight:700,fontSize:13}},'Pipelines'),
+        h('button',{onClick:()=>{const id='p'+Date.now();const np={id,icon:'⚙️',name:'New Pipeline',trigger:{type:'manual',label:'Manual',config:{}},inputs:[],steps:[],lastRun:null,status:'idle'};setPipelines(p=>[...p,np]);setActivePipeline(id)},style:{padding:'3px 8px',background:T.ac,border:'none',borderRadius:6,color:T.tx,cursor:'pointer',fontSize:11,fontWeight:600}},'+New')),
+      h('div',{style:{flex:1,overflowY:'auto',padding:8}},
+        pipelines.map(pl=>{
+          const isActive=pl.id===activePipeline
+          const rs=runState?.pipelineId===pl.id
+          return h('div',{key:pl.id,onClick:()=>setActivePipeline(pl.id),style:{padding:'10px 12px',borderRadius:9,cursor:'pointer',marginBottom:6,background:isActive?T.ac+'18':T.s2,border:'1px solid '+(isActive?T.ac+'55':T.b),transition:'all .15s'}},
+            h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:5}},
+              h('span',{style:{fontSize:16}},pl.icon),
+              h('div',{style:{flex:1,fontWeight:600,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},pl.name),
+              h('div',{style:{width:7,height:7,borderRadius:'50%',background:rs?T.amb:pl.status==='error'?T.rd:T.gr,animation:rs?'pulse 1s infinite':undefined,flexShrink:0}})),
+            h('div',{style:{display:'flex',gap:5,flexWrap:'wrap'}},
+              tag(pl.trigger.type==='schedule'?T.ac:pl.trigger.type==='file-watch'?T.gr:T.mu,pl.trigger.label,{fontSize:9}),
+              tag(T.bl,pl.steps.length+' steps',{fontSize:9})),
+            pl.lastRun&&h('div',{style:{fontSize:10,color:T.mu2,marginTop:4}},'Last: '+pl.lastRun))}))),
+
+    // Center builder
+    h('div',{style:{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}},
+      // Toolbar
+      h('div',{style:{padding:'10px 16px',borderBottom:'1px solid '+T.b,background:T.s1,display:'flex',gap:10,alignItems:'center',flexShrink:0}},
+        h('span',{style:{fontSize:16}}),h('span',{style:{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:15}},ap.icon+' '+ap.name),
+        h('div',{style:{flex:1}}),
+        runState?.pipelineId===ap.id&&h('div',{style:{display:'flex',alignItems:'center',gap:8}},
+          h('div',{style:{fontSize:12,color:T.amb}},'Running…'),
+          h('button',{onClick:()=>{setRunState(null);setPipelines(ps=>ps.map(p=>p.id!==ap.id?p:{...p,status:'idle',steps:p.steps.map(s=>({...s,state:'idle'}))}))},style:{padding:'4px 10px',background:T.rd,border:'none',borderRadius:6,color:T.tx,cursor:'pointer',fontSize:11}},'Stop')),
+        h(Btn,{onClick:()=>handleRun(ap),v:'ok',sx:{padding:'6px 18px',fontSize:13}},runState?.pipelineId===ap.id?'Running…':'▶ Run')),
+
+      h('div',{style:{flex:1,overflowY:'auto',padding:'16px 20px'}},
+        // Trigger block
+        h('div',{style:{background:T.s2,border:'2px solid '+T.gr+'55',borderRadius:12,padding:'12px 16px',marginBottom:4,cursor:'pointer'},onClick:()=>{}},
+          h('div',{style:{display:'flex',alignItems:'center',gap:10}},
+            h('div',{style:{width:32,height:32,borderRadius:8,background:T.gr+'20',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18}},'⚡'),
+            h('div',null,h('div',{style:{fontWeight:700,fontSize:13}},ap.trigger.label),
+              h('div',{style:{fontSize:11,color:T.mu}},ap.trigger.type==='file-watch'?`Watching ${ap.trigger.config.path||'~/folder'} for ${ap.trigger.config.ext||'.mp4'}`:ap.trigger.type==='schedule'?ap.trigger.config.label||'Custom schedule':'Click to configure trigger')),
+            h('div',{style:{marginLeft:'auto'}},tag(T.gr,'Trigger',{fontSize:9})))),
+
+        // Inputs block
+        ap.inputs?.length>0&&h('div',null,
+          h('div',{style:{width:2,height:12,background:T.mu2,margin:'0 auto'}}),
+          h('div',{style:{background:T.s2,border:'1px solid '+T.bl+'55',borderRadius:12,padding:'12px 16px',marginBottom:4}},
+            h('div',{style:{fontSize:11,fontWeight:700,color:T.bl,marginBottom:10,textTransform:'uppercase',letterSpacing:'.5px'}},'Inputs Required Before Run'),
+            ap.inputs.map(inp=>h('div',{key:inp.id,style:{display:'flex',alignItems:'center',gap:8,marginBottom:6,padding:'6px 10px',background:T.s3,borderRadius:7}},
+              h('span',{style:{fontSize:14}},inp.type==='file'?'📎':inp.type==='dropdown'?'▾':'📝'),
+              h('span',{style:{fontSize:12,fontWeight:500}},inp.label),
+              inp.required?tag(T.rd,'required',{fontSize:9}):tag(T.mu,'optional',{fontSize:9}))))),
+
+        // Steps
+        ap.steps.map((step,idx)=>{
+          const st=getStepType(step.typeId)
+          const stepRunning=runState?.stepId===step.id
+          const stepDone=step.state==='done'
+          const stepErr=step.state==='error'
+          return h(Fragment,{key:step.id},
+            h('div',{style:{width:2,height:14,background:stepDone?T.gr:DT[st.out]?.c||T.mu,margin:'0 auto',opacity:.5}}),
+            h('div',{style:{background:T.s2,border:'2px solid '+(stepErr?T.rd:stepRunning?T.amb:stepDone?T.gr+'55':T.b),borderRadius:12,marginBottom:2,transition:'border-color .3s',boxShadow:stepRunning?'0 0 16px '+T.amb+'44':undefined}},
+              // Card header
+              h('div',{style:{padding:'12px 16px',cursor:'pointer',display:'flex',alignItems:'center',gap:10},onClick:()=>toggleStep(ap.id,step.id)},
+                h('div',{style:{width:32,height:32,borderRadius:8,background:(DT[st.out]?.c||T.ac)+'20',display:'flex',alignItems:'center',justifyContent:'center',fontSize:17}},st.i),
+                h('div',{style:{flex:1}},
+                  h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:3}},
+                    h('span',{style:{fontWeight:600,fontSize:13}},st.n),
+                    tag(T.mu,st.cat,{fontSize:9}),
+                    stepRunning&&h(spin),stepDone&&h('span',{style:{color:T.gr}},'✓'),stepErr&&h('span',{style:{color:T.rd}},'✗')),
+                  h('div',{style:{display:'flex',gap:6,alignItems:'center'}},
+                    h(DTBadge,{type:st.inp}),h('span',{style:{color:T.mu,fontSize:10}},'→'),h(DTBadge,{type:st.out}),
+                    step.config.prompt&&h('span',{style:{fontSize:11,color:T.mu2,marginLeft:4,fontStyle:'italic',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:180}},step.config.prompt.slice(0,60)+'…'))),
+                h('span',{style:{color:T.mu,fontSize:12,transition:'transform .2s',display:'inline-block',transform:step.expanded?'rotate(180deg)':'rotate(0deg)'}},'▾')),
+              // Expanded config
+              step.expanded&&h('div',{style:{padding:'0 16px 16px',borderTop:'1px solid '+T.b}},
+                h('div',{style:{paddingTop:14}},
+                  st.fields.map(f=>h(Field,{key:f.k,label:f.l},
+                    h(StepConfigField,{f,val:step.config[f.k],onChange:v=>updateStep(ap.id,step.id,{config:{...step.config,[f.k]:v}})}))),
+                  h('div',{style:{display:'flex',gap:8,marginTop:8}},
+                    h('button',{onClick:()=>setPipelines(ps=>ps.map(p=>p.id!==ap.id?p:{...p,steps:p.steps.filter(s=>s.id!==step.id)})),style:{padding:'5px 12px',background:T.rd+'20',border:'1px solid '+T.rd+'44',borderRadius:6,color:T.rd,cursor:'pointer',fontSize:11}},'Remove Step'),
+                    stepErr&&h('button',{onClick:()=>runPipeline(ap),style:{padding:'5px 12px',background:T.amb+'20',border:'1px solid '+T.amb,borderRadius:6,color:T.amb,cursor:'pointer',fontSize:11}},'Retry')))),
+            // Insert step button
+            h('div',{style:{display:'flex',alignItems:'center',gap:8,margin:'4px 0'}},
+              h('div',{style:{flex:1,height:1,background:T.b}}),
+              h('button',{onClick:()=>{const ns={id:'s'+Date.now(),typeId:'llm',config:{model:'mistral:7b-instruct',prompt:'',temperature:0.7,maxTokens:1000},expanded:true,state:'idle'};setPipelines(ps=>ps.map(p=>p.id!==ap.id?p:{...p,steps:[...p.steps.slice(0,idx+1),ns,...p.steps.slice(idx+1)]}))},style:{padding:'2px 8px',background:T.s3,border:'1px solid '+T.b,borderRadius:10,color:T.mu,cursor:'pointer',fontSize:11}},'+'),
+              h('div',{style:{flex:1,height:1,background:T.b}})));}),
+
+        // Add step
+        h('div',{style:{width:2,height:14,background:T.mu2,margin:'0 auto',opacity:.3}}),
+        h('button',{onClick:()=>{const ns={id:'s'+Date.now(),typeId:'llm',config:{model:'mistral:7b-instruct',prompt:'',temperature:0.7,maxTokens:1000},expanded:true,state:'idle'};setPipelines(ps=>ps.map(p=>p.id!==ap.id?p:{...p,steps:[...p.steps,ns]}))},
+          style:{width:'100%',padding:'10px',background:'none',border:'2px dashed '+T.b2,borderRadius:10,color:T.mu,cursor:'pointer',fontSize:13,marginTop:4}},'+ Add Step'),
+
+        // Run log
+        runState?.pipelineId===ap.id&&runState.log.length>0&&h('div',{style:{marginTop:16,background:T.s2,border:'1px solid '+T.b,borderRadius:10,padding:12}},
+          h('div',{style:{fontSize:10,fontWeight:700,color:T.ac,marginBottom:8,textTransform:'uppercase'}},'Run Log'),
+          h('div',{style:{maxHeight:150,overflowY:'auto'}},
+            runState.log.map((l,i)=>h('div',{key:i,style:{fontSize:11,fontFamily:"'JetBrains Mono',monospace",color:l.startsWith('✓')?T.gr:l.startsWith('✗')?T.rd:l.startsWith('▶')?T.amb:T.mu,marginBottom:3}},l)))))),
+
+    // Right data flow panel
+    h('div',{style:{width:210,borderLeft:'1px solid '+T.b,display:'flex',flexDirection:'column',flexShrink:0,padding:'12px 10px',overflowY:'auto'}},
+      h('div',{style:{fontSize:11,fontWeight:700,color:T.mu,textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}},'Data Flow'),
+      h('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:8,padding:'6px 8px',background:T.gr+'15',border:'1px solid '+T.gr+'33',borderRadius:7}},
+        h('span',null,'⚡'),h('div',{style:{flex:1,fontSize:11,fontWeight:600}},ap.trigger.label),
+        h('div',{style:{width:7,height:7,borderRadius:'50%',background:T.gr,flexShrink:0}})),
+      ap.steps.map((step,idx)=>{
+        const st=getStepType(step.typeId)
+        const isRun=runState?.stepId===step.id
+        const isDone=step.state==='done'
+        const d=DT[st.out]||DT.TEXT
+        return h(Fragment,{key:step.id},
+          h('div',{style:{width:2,height:16,background:isDone?T.gr:d.c,margin:'0 auto',opacity:.5,transition:'background .5s'}}),
+          h('div',{style:{padding:'7px 8px',background:T.s2,border:'1px solid '+(isRun?T.amb:isDone?T.gr+'55':T.b),borderRadius:8,marginBottom:2,transition:'border-color .3s'}},
+            h('div',{style:{display:'flex',alignItems:'center',gap:6,marginBottom:4}},
+              h('span',{style:{fontSize:13}},st.i),
+              h('div',{style:{flex:1,fontSize:11,fontWeight:500,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},st.n),
+              isRun?h(spin):isDone?h('span',{style:{color:T.gr,fontSize:10}},'✓'):h('div',{style:{width:6,height:6,borderRadius:'50%',background:T.mu2}})),
+            h('div',{style:{display:'flex',gap:4,alignItems:'center'}},
+              h('span',{style:{fontSize:10,color:DT[st.inp]?.c||T.mu}},DT[st.inp]?.i||'?'),
+              h('span',{style:{fontSize:9,color:T.mu2}},'→'),
+              h('span',{style:{fontSize:10,color:d.c}},d.i+' '+d.l))))}))),
+
+    // Run modal
+    runModal&&h('div',{style:{position:'fixed',inset:0,background:'rgba(6,6,14,.9)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:100}},
+      h('div',{style:{background:T.s2,border:'1px solid '+T.b2,borderRadius:16,padding:28,width:460,animation:'fadeUp .2s ease'},onClick:e=>e.stopPropagation()},
+        h('div',{style:{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:18,marginBottom:4}},'Before running — '+runModal.name),
+        h('div',{style:{fontSize:13,color:T.mu,marginBottom:20}},'Provide inputs to start this pipeline.'),
+        runModal.inputs.map(inp=>h('div',{key:inp.id,style:{marginBottom:14}},
+          h('div',{style:{fontSize:12,fontWeight:600,marginBottom:5}},inp.label,inp.required&&h('span',{style:{color:T.rd,marginLeft:4}},'*')),
+          inp.type==='file'?h('div',{style:{border:'2px dashed '+T.b2,borderRadius:10,padding:20,textAlign:'center',cursor:'pointer',background:T.s3}},
+            h('div',{style:{fontSize:24,marginBottom:4}},'📎'),h('div',{style:{fontSize:12,color:T.mu}},'Drop file or click to browse'),h('div',{style:{fontSize:10,color:T.mu2,marginTop:4}},inp.ext)):
+          inp.type==='dropdown'?h('select',{value:runInputs[inp.id]||inp.opts[0],onChange:e=>setRunInputs(p=>({...p,[inp.id]:e.target.value})),style:inputSx},inp.opts.map(o=>h('option',{key:o,value:o},o))):
+          h('textarea',{rows:3,value:runInputs[inp.id]||'',onChange:e=>setRunInputs(p=>({...p,[inp.id]:e.target.value})),placeholder:inp.ph||'',style:inputSx}))),
+        h('div',{style:{display:'flex',gap:10,marginTop:8}},
+          h('button',{onClick:()=>setRunModal(null),style:{flex:1,padding:'10px',background:T.s3,border:'1px solid '+T.b,borderRadius:8,color:T.mu,cursor:'pointer'}},'Cancel'),
+          h(Btn,{onClick:()=>{const m=runModal;setRunModal(null);runPipeline(m,runInputs)},sx:{flex:2,padding:'10px',fontSize:14}},'▶ Start Pipeline')))))
+
+  // ── Settings ──
+  const Settings=()=>{
+    const[loc,setLoc]=useState({...settings})
+    const[testing,setTesting]=useState(false)
+    const[testResult,setTestResult]=useState(null)
+    const[pulling,setPulling]=useState(null)
+    const[pullPct,setPullPct]=useState(0)
+    const save=()=>setSettings(loc)
+    const testAnthropic=async()=>{
+      setTesting(true);setTestResult(null)
+      try{const t=await anthropicChat([{role:'user',content:'Reply with exactly: OK'}],loc.anthropicKey);setTestResult(t.includes('OK')?'success':'warn')}
+      catch(e){setTestResult('fail')}
+      setTesting(false)}
+    const pull=async model=>{
+      setPulling(model);setPullPct(0)
+      try{await ollamaPull(model,p=>{if(typeof p==='number')setPullPct(p)})}
+      catch{}
+      const ms=await ollamaModels();setOllamaModelList(ms);setPulling(null)}
+    const WANT_MODELS=[{id:'mistral:7b-instruct',size:'4GB',desc:'Primary chat'},{id:'codellama:13b',size:'8GB',desc:'Code'},{id:'nomic-embed-text',size:'274MB',desc:'Embeddings'}]
+    const hasModel=id=>ollamaModelList.some(m=>m.name===id||m.name.startsWith(id.split(':')[0]))
+    return h('div',{style:{flex:1,overflowY:'auto',padding:'24px',maxWidth:680,margin:'0 auto',width:'100%'}},
+      h('div',{style:{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:20,marginBottom:20}},'Settings'),
+
+      // Ollama
+      h('div',{style:{background:T.s2,border:'1px solid '+T.b,borderRadius:12,padding:18,marginBottom:14}},
+        h('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:16}},
+          h('div',{style:{fontSize:20}},'🦙'),
+          h('div',{style:{flex:1}},h('div',{style:{fontWeight:700,fontSize:15}},'Local Models — Ollama'),
+            h('div',{style:{fontSize:12,color:T.mu}},'Always available, no API costs')),
+          h('div',{style:{display:'flex',alignItems:'center',gap:6}},
+            dot(ollamaOk?T.gr:T.rd,ollamaOk),
+            h('span',{style:{fontSize:12,color:ollamaOk?T.gr:T.rd,fontWeight:600}},ollamaOk?'Connected':'Not running'))),
+        !ollamaOk&&h('div',{style:{background:T.amb+'15',border:'1px solid '+T.amb+'44',borderRadius:8,padding:12,marginBottom:12,fontSize:12}},
+          h('div',{style:{fontWeight:600,color:T.amb,marginBottom:4}},'Ollama not detected'),
+          h('div',{style:{color:T.mu}},'Install from '),h('a',{href:'https://ollama.ai',target:'_blank',style:{color:T.ac}},'ollama.ai'),
+          h('div',{style:{color:T.mu,marginTop:4}},'Then run: '),h('code',{style:{fontFamily:"'JetBrains Mono',monospace",color:T.tl}},'ollama serve')),
+        h(Field,{label:'Default Model'},
+          h('select',{value:loc.ollamaModel,onChange:e=>setLoc(l=>({...l,ollamaModel:e.target.value})),style:inputSx},
+            [...ollamaModelList.map(m=>h('option',{key:m.name,value:m.name},m.name)),
+              !ollamaModelList.length&&h('option',{key:'none',value:'mistral:7b-instruct'},'mistral:7b-instruct')])),
+        h('div',{style:{fontSize:11,fontWeight:600,color:T.mu,textTransform:'uppercase',marginBottom:8}},'Model Library'),
+        WANT_MODELS.map(m=>{
+          const has=hasModel(m.id)
+          const isPulling=pulling===m.id
+          return h('div',{key:m.id,style:{display:'flex',alignItems:'center',gap:10,padding:'8px 10px',background:has?T.gr+'12':T.s3,borderRadius:8,marginBottom:5,border:'1px solid '+(has?T.gr+'33':T.b)}},
+            dot(has?T.gr:T.mu2),
+            h('div',{style:{flex:1}},h('div',{style:{fontSize:12,fontWeight:500}},m.id),h('div',{style:{fontSize:10,color:T.mu}},m.desc+' — '+m.size)),
+            has?tag(T.gr,'Ready',{fontSize:9}):
+              isPulling?h('div',{style:{display:'flex',alignItems:'center',gap:6}},h(spin),h('span',{style:{fontSize:11,color:T.amb}},pullPct+'%')):
+              h('button',{onClick:()=>pull(m.id),disabled:!ollamaOk,style:{padding:'3px 10px',background:T.ac,border:'none',borderRadius:5,color:T.tx,cursor:'pointer',fontSize:11,opacity:ollamaOk?1:.4}},'Pull'))})),
+
+      // Anthropic
+      h('div',{style:{background:T.s2,border:'1px solid '+(loc.anthropicEnabled?T.ac+'55':T.b),borderRadius:12,padding:18,marginBottom:14}},
+        h('div',{style:{display:'flex',alignItems:'center',gap:10,marginBottom:loc.anthropicEnabled?16:0}},
+          h('div',{style:{fontSize:20}},'🤖'),
+          h('div',{style:{flex:1}},h('div',{style:{fontWeight:700,fontSize:15}},'Anthropic Claude'),h('div',{style:{fontSize:12,color:T.mu}},'Optional — claude-haiku-3-5 only (cheapest)')),
+          h('div',{onClick:()=>setLoc(l=>({...l,anthropicEnabled:!l.anthropicEnabled})),style:{width:40,height:22,borderRadius:11,background:loc.anthropicEnabled?T.ac:T.s4,cursor:'pointer',position:'relative',transition:'background .2s'}},
+            h('div',{style:{position:'absolute',top:4,left:loc.anthropicEnabled?20:4,width:14,height:14,borderRadius:'50%',background:'#fff',transition:'left .2s'}}))),
+        loc.anthropicEnabled&&h('div',null,
+          h(Field,{label:'API Key'},
+            h('div',{style:{display:'flex',gap:8}},
+              h('input',{type:'password',value:loc.anthropicKey,onChange:e=>setLoc(l=>({...l,anthropicKey:e.target.value})),placeholder:'sk-ant-…',style:{...inputSx,flex:1}}),
+              h('button',{onClick:testAnthropic,disabled:testing||!loc.anthropicKey,style:{padding:'8px 12px',background:T.bl,border:'none',borderRadius:7,color:T.tx,cursor:'pointer',fontSize:12}},testing?'…':'Test'),
+              testResult&&h('span',{style:{color:testResult==='success'?T.gr:T.rd,fontSize:20}},testResult==='success'?'✓':'✗'))),
+          h(Field,{label:'Daily Budget'},
+            h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+              h('input',{type:'number',value:loc.budget,onChange:e=>setLoc(l=>({...l,budget:Number(e.target.value)})),style:{...inputSx,width:80}},),
+              h('span',{style:{fontSize:12,color:T.mu}},'USD / day  (warn at $0.50, stop at limit)'),
+              h('span',{style:{fontSize:12,color:T.mu}},'Today: $'+(ls.get('spend_'+new Date().toDateString(),0)).toFixed(4)))),
+          h('div',{style:{fontSize:11,color:T.amb,padding:'8px 10px',background:T.amb+'15',borderRadius:7}},'⚠ API key mode charges per token. Use OAuth at claude.ai for your Pro/Max subscription instead.'))),
+
+      h('div',{style:{display:'flex',gap:10,marginTop:4}},
+        h(Btn,{onClick:save,v:'ok'},'Save Settings'),
+        h(Btn,{onClick:async()=>{const ok=await ollamaPing();setOllamaOk(ok);if(ok){const ms=await ollamaModels();setOllamaModelList(ms)}},v:'ghost'},'Refresh Ollama'))))
+
+  // ── Stubs for steps 2 & 3 ──
+  const Stub=({icon,title,msg})=>h('div',{style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:T.mu,gap:12}},
+    h('div',{style:{fontSize:48}}),h('div',{style:{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:20,color:T.tx}}),
+    h('div',{style:{fontSize:13,color:T.mu,textAlign:'center',maxWidth:400,lineHeight:1.7}},
+      h('div',{style:{fontSize:52,marginBottom:12}},icon),
+      h('div',{style:{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:20,color:T.tx,marginBottom:8}},title),msg))
+
+  const openTab=(id,label,comp,data)=>{setDynTabs(p=>[...p.filter(x=>x.id!==id),{id,label,closeable:true,comp,data}]);setTab(id)}
+  const closeTab=id=>{setDynTabs(p=>p.filter(x=>x.id!==id));setTab('chat')}
+
+  // ── Tab routing ──
+  const renderContent=()=>{
+    if(tab==='chat')return h(Chat)
+    if(tab==='pipelines')return h(Pipelines)
+    if(tab==='tools')return h(Stub,{icon:'🔧',title:'Tools Hub',msg:'Step 3 coming next — Voice Recorder, Outreach Intelligence, Summarizer, Translator, Image Generator, and more'})
+    if(tab==='automations')return h(Stub,{icon:'⚡',title:'Automations + AI Copilot',msg:'Step 2 coming next — drag-drop canvas with AI Copilot sidebar that builds automations from natural language'})
+    if(tab==='connections')return h(Stub,{icon:'🔌',title:'Connections',msg:'Step 2 coming next — multi-account service connections'})
+    if(tab==='agents')return h(Stub,{icon:'🤖',title:'Agents',msg:'Autonomous background workers — coming in Step 3'})
+    if(tab==='settings')return h(Settings)
+    const dyn=dynTabs.find(t=>t.id===tab)
+    if(dyn)return h('div',{style:{padding:32,flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:T.mu}},
+      h('div',{style:{fontSize:48,marginBottom:12}}),h('div',{style:{fontFamily:"'Syne',sans-serif",fontWeight:700,fontSize:20,color:T.tx,marginBottom:6}},dyn.data?.name||'Tool'),
+      h('div',{style:{fontSize:13,color:T.mu}},dyn.data?.desc||'Custom tool built via chat'))
+    return null}
+
+  const TABS=[{id:'chat',label:'💬 Chat'},{id:'pipelines',label:'🔄 Pipelines'},{id:'tools',label:'🔧 Tools'},{id:'automations',label:'⚡ Automations'},{id:'connections',label:'🔌 Connections'},{id:'agents',label:'🤖 Agents'},{id:'settings',label:'⚙️ Settings'}]
+  const allTabs=[...TABS,...dynTabs]
+  const spend=ls.get('spend_'+new Date().toDateString(),0)
+
+  return h('div',{style:{background:T.bg,height:'100vh',display:'flex',flexDirection:'column',overflow:'hidden'}},
+    h('style',null,'@keyframes fadeUp{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:translateY(0)}}@keyframes pulse{0%,100%{opacity:.2;transform:scale(.75)}50%{opacity:1;transform:scale(1)}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes blink{0%,100%{opacity:.15;transform:scale(.7)}50%{opacity:1;transform:scale(1)}}@keyframes glow{0%,100%{box-shadow:0 0 0 0 rgba(220,53,69,.4)}50%{box-shadow:0 0 0 10px rgba(220,53,69,0)}}'),
+    !onboarded&&h(Onboarding),
+
+    // Header
+    h('div',{style:{background:T.s1,borderBottom:'1px solid '+T.b,padding:'0 20px',height:50,display:'flex',alignItems:'center',gap:14,flexShrink:0}},
+      h('div',{style:{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,display:'flex',alignItems:'center',gap:8}},
+        h('div',{style:{width:27,height:27,borderRadius:7,background:'linear-gradient(135deg,'+T.ac+','+T.pk+')',display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}},'🌌'),
+        h('span',{style:{color:T.ac}},'Universe'),h('span',null,' AI')),
+      h('div',{style:{flex:1}}),
+      badge(ollamaOk?T.gr:T.rd,dot(ollamaOk?T.gr:T.rd,ollamaOk),ollamaOk?'Ollama Ready':'No Local AI'),
+      settings.anthropicEnabled&&settings.anthropicKey&&badge(T.ac,'Claude Haiku'),
+      spend>0&&badge(T.amb,'$'+spend.toFixed(3)+' today')),
+
+    // Tabs
+    h('div',{style:{background:T.s1,borderBottom:'1px solid '+T.b,padding:'0 18px',display:'flex',overflowX:'auto',flexShrink:0}},
+      allTabs.map(t=>h('div',{key:t.id,style:{display:'flex',alignItems:'center',gap:4,flexShrink:0}},
+        h('button',{onClick:()=>setTab(t.id),style:{padding:'10px 15px',background:'none',border:'none',borderBottom:tab===t.id?'2px solid '+T.ac:'2px solid transparent',color:tab===t.id?T.tx:T.mu,cursor:'pointer',fontSize:13,fontWeight:tab===t.id?500:400,marginBottom:-1,whiteSpace:'nowrap'}},t.label),
+        t.closeable&&h('button',{onClick:e=>{e.stopPropagation();closeTab(t.id)},style:{background:'none',border:'none',color:T.mu2,cursor:'pointer',fontSize:13,padding:'0 3px',marginLeft:-6}},'×')))),
+
+    h('div',{style:{flex:1,overflow:'hidden',display:'flex',flexDirection:'column'}},renderContent()))
+}
+createRoot(document.getElementById('app')).render(h(App))
+</script>
+</body>
+</html>

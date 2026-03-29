@@ -1,0 +1,19 @@
+{
+  "name": "universe-ai",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n SIDECAR,FRONTEND \"npm run dev:sidecar\" \"npm run dev:frontend\"",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:sidecar": "cd sidecar && .venv\\Scripts\\python.exe main.py",
+    "dev:tauri": "cd src-tauri && cargo tauri dev",
+    "install:all": "npm run install:frontend && npm run install:sidecar",
+    "install:frontend": "cd frontend && npm install",
+    "install:sidecar": "cd sidecar && .venv\\Scripts\\python.exe -m pip install -r requirements.txt",
+    "setup:venv": "cd sidecar && python -m venv .venv && .venv\\Scripts\\python.exe -m pip install --upgrade pip --quiet && .venv\\Scripts\\python.exe -m pip install -r requirements.txt",
+    "build": "cd src-tauri && cargo tauri build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
